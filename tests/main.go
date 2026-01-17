@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"com.beyond.services.api.client/pkg/hub"
+	"github.com/ilyskies/QuestHub/pkg/hub"
 )
 
 func main() {
