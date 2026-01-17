@@ -1,4 +1,4 @@
-module com.beyond.services.api.client
+module github.com/ilyskies/QuestHub
 
 go 1.25.4
 
