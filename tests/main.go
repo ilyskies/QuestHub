@@ -14,119 +14,140 @@ import (
 	"github.com/ilyskies/QuestHub/pkg/hub"
 )
 
+const (
+	hubURL         = "http://localhost:5294/hub"
+	readyTimeout   = 15 * time.Second
+	defaultTimeout = 15 * time.Second
+)
+
 func main() {
-	client := hub.NewClient(
-		"http://localhost:5294/hub",
+	client := newClient()
+
+	if err := connect(client); err != nil {
+		log.Fatalf("Connection failed: %v", err)
+	}
+	defer client.Disconnect()
+
+	if err := waitForReady(client); err != nil {
+		log.Printf("Ready wait failed: %v", err)
+	} else {
+		if err := runOperations(client); err != nil {
+			log.Printf("Operations error: %v", err)
+		}
+	}
+
+	waitForShutdown()
+}
+
+func newClient() *hub.Client {
+	return hub.NewClient(
+		hubURL,
 		hub.WithTimeout(30*time.Second),
 	)
+}
 
+func connect(client *hub.Client) error {
+	log.Println("Connecting to Hub...")
+	if err := client.Connect(); err != nil {
+		return err
+	}
+	log.Println("Connected successfully")
+
+	client.OnDisconnect(func(err error) {
+		log.Printf("Disconnected: %v", "I miss you skies :( Me sad you gone :(", err)
+	})
+
+	return nil
+}
+
+func waitForReady(client *hub.Client) error {
 	readyCh := make(chan struct{}, 1)
-	var ran atomic.Bool
+	var triggered atomic.Bool
 
 	client.OnReady(func(status hub.ReadyStatus) {
-		if status.Initialized && ran.CompareAndSwap(false, true) {
+		if status.Initialized && triggered.CompareAndSwap(false, true) {
 			readyCh <- struct{}{}
 		}
 	})
 
-	client.OnDisconnect(func(err error) {
-		log.Printf("Disconnected: %v", err)
-	})
-
-	log.Println("Connecting to Hub...")
-	if err := client.Connect(); err != nil {
-		log.Fatalf("Failed to connect: %v", err)
-	}
-	defer client.Disconnect()
-
-	log.Println("Connected successfully")
-
 	select {
 	case <-readyCh:
-		if err := runOperations(client); err != nil {
-			log.Printf("Error running operations: %v", err)
-		}
-	case <-time.After(15 * time.Second):
-		log.Printf("Timed out waiting for Ready")
+		return nil
+	case <-time.After(readyTimeout):
+		return fmt.Errorf("timed out waiting for Ready")
 	}
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-	<-sigCh
 }
 
 func runOperations(client *hub.Client) error {
-	call := func(d time.Duration) (context.Context, context.CancelFunc) {
-		return context.WithTimeout(context.Background(), d)
+	if err := logServiceStatus(client); err != nil {
+		return err
 	}
 
-	{
-		ctx, cancel := call(10 * time.Second)
-		defer cancel()
-		status, err := client.GetServiceStatus(ctx)
-		if err != nil {
-			return fmt.Errorf("get status: %w", err)
-		}
-		log.Printf("Version: %s", status.Version)
-		log.Printf("Initialized: %v", status.Initialized)
+	if err := clearCache(client); err != nil {
+		return err
 	}
 
+	if err := fetchAndSave("daily_quests.json", client.GetDailyQuests); err != nil {
+		return err
+	}
+
+	if err := fetchAndSave("challenge_bundles.json", client.GetChallengeBundles); err != nil {
+		return err
+	}
+
+	if err := fetchAndSave("bundle_schedules.json", client.GetChallengeBundleSchedules); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func logServiceStatus(client *hub.Client) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	status, err := client.GetServiceStatus(ctx)
+	if err != nil {
+		return fmt.Errorf("get status: %w", err)
+	}
+
+	log.Printf("Version: %s", status.Version)
+	log.Printf("Initialized: %v", status.Initialized)
+	return nil
+}
+
+func clearCache(client *hub.Client) error {
 	log.Println("\nClearing cache")
-	{
-		ctx, cancel := call(15 * time.Second)
-		defer cancel()
-		clearResult, err := client.ClearCache(ctx)
-		if err != nil {
-			return fmt.Errorf("clear cache: %w", err)
-		}
-		log.Printf("Cleared %d keys", clearResult.KeysCleared)
+
+	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
+	defer cancel()
+
+	result, err := client.ClearCache(ctx)
+	if err != nil {
+		return fmt.Errorf("clear cache: %w", err)
 	}
 
-	{
-		ctx, cancel := call(15 * time.Second)
-		defer cancel()
-		quests, err := client.GetDailyQuests(ctx)
-		if err != nil {
-			return fmt.Errorf("get quests: %w", err)
-		}
+	log.Printf("Cleared %d keys", result.KeysCleared)
+	return nil
+}
 
-		if err := writeJSONFile("daily_quests.json", quests); err != nil {
-			return fmt.Errorf("write daily quests json: %w", err)
-		}
+func fetchAndSave[T any](
+	filename string,
+	fetch func(context.Context) (T, error),
+) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
-		log.Printf("Found %d daily quests", len(quests))
+	data, err := fetch(ctx)
+	if err != nil {
+		return err
 	}
 
-	{
-		ctx, cancel := call(30 * time.Second)
-		defer cancel()
-		bundles, err := client.GetChallengeBundles(ctx)
-		if err != nil {
-			return fmt.Errorf("get bundles: %w", err)
-		}
-
-		if err := writeJSONFile("challenge_bundles.json", bundles); err != nil {
-			return fmt.Errorf("write challenge bundles json: %w", err)
-		}
-
-		log.Printf("Found %d challenge bundles", len(bundles))
+	if err := writeJSONFile(filename, data); err != nil {
+		return err
 	}
 
-	{
-		ctx, cancel := call(30 * time.Second)
-		defer cancel()
-		schedules, err := client.GetChallengeBundleSchedules(ctx)
-		if err != nil {
-			return fmt.Errorf("get schedules: %w", err)
-		}
-
-		if err := writeJSONFile("bundle_schedules.json", schedules); err != nil {
-			return fmt.Errorf("write schedules json: %w", err)
-		}
-
-		log.Printf("Found %d schedules", len(schedules))
-	}
-
+	log.Printf("Saved %s", filename)
 	return nil
 }
 
@@ -136,4 +157,11 @@ func writeJSONFile(filename string, v interface{}) error {
 		return err
 	}
 	return os.WriteFile(filename, data, 0644)
+}
+
+func waitForShutdown() {
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	<-sigCh
+	log.Println("Shutting down...")
 }
