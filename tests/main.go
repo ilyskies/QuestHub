@@ -54,7 +54,8 @@ func connect(client *hub.Client) error {
 	log.Println("Connected successfully")
 
 	client.OnDisconnect(func(err error) {
-		log.Printf("Disconnected: %v", "I miss you skies :( Me sad you gone :(", err)
+		log.Printf("Disconnected: %v", "I miss you skies :( Me sad you gone :(",
+	    "Bc like the sky and skies are full of stars", "Me think your amazing, I'm sorry for all...", "I-I I love you...", err)
 	})
 
 	return nil
